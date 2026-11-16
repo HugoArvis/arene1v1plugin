@@ -14,17 +14,19 @@ Au bout de N morts (configurable), le duel se termine et chaque joueur reçoit u
 
 ## Compiler
 
-Il faut le **SDK .NET 10** (CounterStrikeSharp 1.0.380 cible `net10.0`) : https://dotnet.microsoft.com/download
+Avec **CssCompiler** (johnoclock) : glisser le dossier du projet sur `CssCompiler.exe`.
+La DLL sort dans `compiled/<nom du dossier>/Arena1v1.dll`.
 
-```
-dotnet build -c Release
-```
+- Le projet cible `net7.0` avec CounterStrikeSharp.API **1.0.198**, parce que CssCompiler lance toujours
+  `dotnet publish -f net7.0`. Le plugin marche quand même sur un serveur avec une version récente de CSS.
+- Il faut un **SDK .NET** installé (7, 8, 9 ou 10, version x64) : CssCompiler appelle la commande `dotnet`.
+- Laisser `"Updateapis": false` dans le `config.json` de CssCompiler, sinon l'API passe en net10.0 et la compilation échoue.
 
-La DLL se trouve dans `bin/Release/net10.0/Arena1v1.dll`.
+Ou à la main : `dotnet publish -c Release`
 
 ## Installer sur le serveur
 
-1. Le serveur CS2 doit avoir Metamod:Source + CounterStrikeSharp **v380 ou plus récent** (même version que le paquet NuGet).
+1. Le serveur CS2 doit avoir Metamod:Source + CounterStrikeSharp (v198 ou plus récent).
 2. Copier `Arena1v1.dll` dans `game/csgo/addons/counterstrikesharp/plugins/Arena1v1/`.
 3. Redémarrer ou taper `css_plugins load Arena1v1` dans la console serveur.
 4. La config est générée dans `addons/counterstrikesharp/configs/plugins/Arena1v1/Arena1v1.json`.

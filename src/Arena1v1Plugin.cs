@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Arena1v1;
 
-[MinimumApiVersion(300)]
+[MinimumApiVersion(198)]
 public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 {
     public override string ModuleName => "Arena 1v1";

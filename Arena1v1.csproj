@@ -1,16 +1,24 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      net7.0 obligatoire : CssCompiler (johnoclock) lance toujours "dotnet publish -f net7.0".
+      CounterStrikeSharp.API 1.0.198 est la dernière version qui cible net7.0 ; toutes les API
+      utilisées par le plugin sont identiques dans les versions récentes du serveur (vérifié jusqu'à 1.0.380).
+      Ne pas activer "Updateapis" dans CssCompiler : il passerait l'API en net10.0 et la compilation échouerait.
+    -->
+    <TargetFramework>net7.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>Arena1v1</AssemblyName>
     <RootNamespace>Arena1v1</RootNamespace>
+    <!-- net7.0 n'est plus supporté par Microsoft : on masque l'avertissement des SDK récents -->
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- La DLL de l'API est fournie par le serveur : on ne la copie pas dans le dossier de sortie -->
-    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.380">
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.198">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
   </ItemGroup>
