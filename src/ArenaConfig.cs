@@ -82,6 +82,7 @@ public class ArenaConfig : BasePluginConfig
         "mp_roundtime_hostage 60",
         "mp_timelimit 30",
         "mp_freezetime 0",
+        "mp_join_grace_time 0",
         "mp_autoteambalance 0",
         "mp_limitteams 0",
         "mp_buytime 0",

@@ -79,6 +79,12 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
                 Server.ExecuteCommand(cmd);
             EnsureArenasLoaded();
             TryMatch();
+
+            // Les joueurs déjà en vie (rechargement du plugin en cours de map) et sans duel attendent.
+            if (ModeActive)
+                foreach (var ap in _players.Values.Where(p => p.Duel == null))
+                    if (ap.Controller is { } ctrl && IsValidPlayer(ctrl))
+                        SendToWaiting(ctrl);
         }, TimerFlags.STOP_ON_MAPCHANGE);
     }
 
@@ -134,10 +140,20 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
         _queue.Add(ap);
     }
 
-    private static void MoveToSpectator(CCSPlayerController c)
+    /// <summary>Délai entre l'arrivée dans une équipe et le respawn (trop court = joueur "fantôme" sans arme à -1 PV).</summary>
+    private const float TeamJoinRespawnDelay = 1.0f;
+
+    private static bool IsOnPlayingTeam(CCSPlayerController? c) =>
+        c != null && c.Team is CsTeam.Terrorist or CsTeam.CounterTerrorist;
+
+    /// <summary>
+    /// Un joueur hors duel ne doit pas être en vie : on le tue et il regarde les duels en attendant.
+    /// On ne le passe PAS en spectateur : changer d'équipe puis respawn crée des joueurs "fantômes".
+    /// </summary>
+    private static void SendToWaiting(CCSPlayerController c)
     {
-        if (c.Team != CsTeam.Spectator)
-            c.ChangeTeam(CsTeam.Spectator);
+        if (c.PawnIsAlive)
+            c.PlayerPawn.Value?.CommitSuicide(false, true);
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
@@ -148,16 +164,12 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
         var ap = GetOrCreate(c!);
         Enqueue(ap);
 
-        AddTimer(0.5f, () =>
+        AddTimer(1.0f, () =>
         {
             if (!ModeActive || ap.Disconnected) return;
             TryMatch();
-            var ctrl = ap.Controller;
-            if (ap.Duel == null && IsValidPlayer(ctrl))
-            {
-                MoveToSpectator(ctrl!);
-                ctrl!.PrintToChat($"{Prefix} Bienvenue ! Tu es dans la file d'attente des duels. Tape {ChatColors.Yellow}!arena{ChatColors.Default} pour ton statut.");
-            }
+            if (ap.Duel == null)
+                ap.Controller?.PrintToChat($"{Prefix} Bienvenue ! Choisis une équipe (T ou CT) pour rejoindre la file des duels. Tape {ChatColors.Yellow}!arena{ChatColors.Default} pour ton statut.");
         }, TimerFlags.STOP_ON_MAPCHANGE);
 
         return HookResult.Continue;
@@ -179,8 +191,8 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
     }
 
     /// <summary>
-    /// Les équipes sont gérées par le plugin : un joueur qui choisit T/CT rejoint la file,
-    /// un joueur qui choisit Spectateur se met en pause.
+    /// Choisir T/CT = rejoindre la file des duels ; choisir Spectateur = se mettre en pause.
+    /// On bloque seulement les changements d'équipe pendant un duel.
     /// </summary>
     private HookResult OnJoinTeam(CCSPlayerController? c, CommandInfo info)
     {
@@ -191,19 +203,30 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
         if (team == (int)CsTeam.Spectator)
         {
-            SetOptOut(ap, true);
-            return HookResult.Continue; // on laisse le jeu le passer spectateur
+            SetOptOut(ap, true, moveToSpectator: false); // le jeu le passe spectateur lui-même
+            return HookResult.Continue;
         }
 
-        if (ap.OptedOut)
-            SetOptOut(ap, false);
-        else if (ap.Duel == null)
-            c!.PrintToChat($"{Prefix} Tu es déjà dans la file d'attente ({QueuePosition(ap)}).");
+        if (ap.Duel != null)
+        {
+            c!.PrintToChat($"{Prefix} Tu ne peux pas changer d'équipe pendant un duel.");
+            return HookResult.Handled;
+        }
 
-        return HookResult.Handled; // le plugin choisit l'équipe lui-même
+        ap.OptedOut = false;
+        Enqueue(ap);
+        AddTimer(TeamJoinRespawnDelay, () =>
+        {
+            if (ap.Disconnected || ap.Duel != null) return;
+            TryMatch();
+            if (ap.Duel == null)
+                ap.Controller?.PrintToChat($"{Prefix} En attente d'un adversaire ({QueuePosition(ap)}).");
+        }, TimerFlags.STOP_ON_MAPCHANGE);
+
+        return HookResult.Continue;
     }
 
-    private void SetOptOut(ArenaPlayer ap, bool optOut)
+    private void SetOptOut(ArenaPlayer ap, bool optOut, bool moveToSpectator = true)
     {
         var c = ap.Controller;
         if (optOut)
@@ -216,17 +239,31 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
                 duel.Other(ap).Controller?.PrintToChat($"{Prefix} Ton adversaire a abandonné le duel.");
                 EndDuel(duel, duel.Other(ap));
             }
-            if (IsValidPlayer(c)) MoveToSpectator(c!);
+            if (moveToSpectator && IsValidPlayer(c) && c!.Team != CsTeam.Spectator)
+                c.ChangeTeam(CsTeam.Spectator);
             c?.PrintToChat($"{Prefix} Tu es en pause. Tape {ChatColors.Yellow}!afk{ChatColors.Default} pour revenir.");
         }
         else
         {
             if (!ap.OptedOut) return;
             ap.OptedOut = false;
+
+            // Retour depuis le mode spectateur : on le met dans l'équipe la moins remplie.
+            if (IsValidPlayer(c) && !IsOnPlayingTeam(c))
+            {
+                int t = Utilities.GetPlayers().Count(p => p.Team == CsTeam.Terrorist);
+                int ct = Utilities.GetPlayers().Count(p => p.Team == CsTeam.CounterTerrorist);
+                c!.ChangeTeam(t <= ct ? CsTeam.Terrorist : CsTeam.CounterTerrorist);
+            }
+
             Enqueue(ap);
-            TryMatch();
-            if (ap.Duel == null)
-                c?.PrintToChat($"{Prefix} Tu es de retour dans la file d'attente ({QueuePosition(ap)}).");
+            AddTimer(TeamJoinRespawnDelay, () =>
+            {
+                if (ap.Disconnected || ap.Duel != null) return;
+                TryMatch();
+                if (ap.Duel == null)
+                    ap.Controller?.PrintToChat($"{Prefix} Tu es de retour dans la file d'attente ({QueuePosition(ap)}).");
+            }, TimerFlags.STOP_ON_MAPCHANGE);
         }
     }
 
@@ -254,20 +291,24 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
         _queue.RemoveAll(ap => ap.Disconnected || ap.OptedOut || !IsValidPlayer(ap.Controller));
 
-        while (_queue.Count >= 2)
+        while (true)
         {
+            // Seuls les joueurs dans une équipe (T ou CT) peuvent être appariés.
+            var ready = _queue.Where(ap => IsOnPlayingTeam(ap.Controller)).ToList();
+            if (ready.Count < 2) break;
+
             int arena = FindFreeArena();
             if (arena < 0) break;
 
             // On cherche la première paire (dans l'ordre de la file) qui ne vient pas de s'affronter.
             ArenaPlayer? a = null, b = null;
-            for (int i = 0; i < _queue.Count && a == null; i++)
+            for (int i = 0; i < ready.Count && a == null; i++)
             {
-                for (int j = i + 1; j < _queue.Count; j++)
+                for (int j = i + 1; j < ready.Count; j++)
                 {
-                    if (_queue[i].LastOpponent == _queue[j] || _queue[j].LastOpponent == _queue[i]) continue;
-                    a = _queue[i];
-                    b = _queue[j];
+                    if (ready[i].LastOpponent == ready[j] || ready[j].LastOpponent == ready[i]) continue;
+                    a = ready[i];
+                    b = ready[j];
                     break;
                 }
             }
@@ -275,9 +316,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
             if (a == null || b == null)
             {
                 // Seule une revanche est possible : on l'autorise si personne d'autre ne joue.
-                if (!Config.AllowRematchIfAlone || _queue.Count != 2 || AnyDuelRunning()) break;
-                a = _queue[0];
-                b = _queue[1];
+                if (!Config.AllowRematchIfAlone || ready.Count != 2 || AnyDuelRunning()) break;
+                a = ready[0];
+                b = ready[1];
             }
 
             _queue.Remove(a);
@@ -334,11 +375,11 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
                 $"({duel.Loadout.Name}, {ModeText()}).");
         }
 
-        BringIntoArena(a, duel, CsTeam.Terrorist);
-        BringIntoArena(b, duel, CsTeam.CounterTerrorist);
+        BringIntoArena(a, duel);
+        BringIntoArena(b, duel);
     }
 
-    private void BringIntoArena(ArenaPlayer ap, Duel duel, CsTeam team)
+    private void BringIntoArena(ArenaPlayer ap, Duel duel)
     {
         var c = ap.Controller;
         if (!IsValidPlayer(c)) return;
@@ -349,18 +390,16 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
             return;
         }
 
-        if (c.Team is CsTeam.Spectator or CsTeam.None)
-            c.ChangeTeam(team);
-
         // Le Respawn déclenche EventPlayerSpawn -> PreparePlayer.
-        AddTimer(0.1f, () => RespawnIfStillInDuel(ap, duel), TimerFlags.STOP_ON_MAPCHANGE);
+        // (mp_teammates_are_enemies 1 : l'équipe du joueur n'a pas d'importance.)
+        AddTimer(TeamJoinRespawnDelay, () => RespawnIfStillInDuel(ap, duel), TimerFlags.STOP_ON_MAPCHANGE);
     }
 
     private void RespawnIfStillInDuel(ArenaPlayer ap, Duel duel)
     {
         if (duel.Finished || ap.Duel != duel) return;
         var c = ap.Controller;
-        if (IsValidPlayer(c) && !c!.PawnIsAlive && c.Team is CsTeam.Terrorist or CsTeam.CounterTerrorist)
+        if (IsValidPlayer(c) && !c!.PawnIsAlive && IsOnPlayingTeam(c))
             c.Respawn();
     }
 
@@ -434,7 +473,7 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
             if (ap.Duel != null)
                 PreparePlayer(ap);
             else
-                MoveToSpectator(ctrl); // personne ne doit être en vie hors d'un duel
+                SendToWaiting(ctrl); // personne ne doit être en vie hors d'un duel
         });
 
         return HookResult.Continue;
@@ -519,7 +558,7 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
             if (p.Duel != null || p.Disconnected) continue;
             var c = p.Controller;
             if (!IsValidPlayer(c)) continue;
-            MoveToSpectator(c!);
+            SendToWaiting(c!);
             if (!p.OptedOut)
                 c!.PrintToChat($"{Prefix} En attente d'un adversaire ({QueuePosition(p)}).");
         }
@@ -555,7 +594,13 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
         }
 
         foreach (var ap in _queue)
-            ap.Controller?.PrintToCenterHtml($"En attente d'un adversaire<br>{QueuePosition(ap)}", 2);
+        {
+            var c = ap.Controller;
+            if (c == null) continue;
+            c.PrintToCenterHtml(IsOnPlayingTeam(c)
+                ? $"En attente d'un adversaire<br>{QueuePosition(ap)}"
+                : "Choisis une équipe (T ou CT)<br>pour rejoindre les duels", 2);
+        }
     }
 
     // ------------------------------------------------------------------ commandes joueurs
@@ -591,6 +636,15 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
     // ------------------------------------------------------------------ commandes admin (édition des arènes)
 
+    /// <summary>Vérifie le flag @css/root et prévient le joueur s'il ne l'a pas (au lieu d'un refus silencieux).</summary>
+    private bool CheckAdmin(CCSPlayerController? caller, CommandInfo info)
+    {
+        Logger.LogInformation("{Player} utilise : {Command}", caller?.PlayerName ?? "console", info.GetCommandString);
+        if (caller == null || AdminManager.PlayerHasPermissions(caller, "@css/root")) return true;
+        info.ReplyToCommand($"{Prefix} Il faut être admin (@css/root) : ajoute ton SteamID64 dans configs/admins.json.");
+        return false;
+    }
+
     private static SpawnData? SpawnFromPlayer(CCSPlayerController? c)
     {
         var pawn = c?.PlayerPawn.Value;
@@ -625,9 +679,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
     }
 
     [ConsoleCommand("css_arena_list", "Liste les arènes de la map")]
-    [RequiresPermissions("@css/root")]
     public void CmdList(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         info.ReplyToCommand($"{Prefix} {_arenas.Count} arène(s) sur {_mapName} :");
         for (int i = 0; i < _arenas.Count; i++)
@@ -640,9 +694,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
     [ConsoleCommand("css_arena_add", "Crée une arène avec le spawn 1 à ta position")]
     [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    [RequiresPermissions("@css/root")]
     public void CmdAdd(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         var spawn = SpawnFromPlayer(caller);
         if (spawn == null)
@@ -657,9 +711,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
     [ConsoleCommand("css_arena_setspawn", "Définit le spawn 1 ou 2 d'une arène à ta position")]
     [CommandHelper(minArgs: 2, usage: "<id> <1|2>", whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    [RequiresPermissions("@css/root")]
     public void CmdSetSpawn(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         if (!TryGetArenaId(info, 1, out var idx)) return;
         var spawn = SpawnFromPlayer(caller);
@@ -683,9 +737,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
     [ConsoleCommand("css_arena_del", "Supprime une arène")]
     [CommandHelper(minArgs: 1, usage: "<id>")]
-    [RequiresPermissions("@css/root")]
     public void CmdDelete(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         if (!TryGetArenaId(info, 1, out var idx)) return;
         _arenas.RemoveAt(idx);
@@ -695,9 +749,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
 
     [ConsoleCommand("css_arena_tp", "Te téléporte au spawn d'une arène")]
     [CommandHelper(minArgs: 1, usage: "<id> [1|2]", whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    [RequiresPermissions("@css/root")]
     public void CmdTeleport(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         if (!TryGetArenaId(info, 1, out var idx)) return;
         var spawn = info.GetArg(2) == "2" ? _arenas[idx].Spawn2 : _arenas[idx].Spawn1;
@@ -711,18 +765,18 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
     }
 
     [ConsoleCommand("css_arena_save", "Sauvegarde les arènes de la map")]
-    [RequiresPermissions("@css/root")]
     public void CmdSave(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         EnsureArenasLoaded();
         var path = _store.Save(_mapName, _arenas);
         info.ReplyToCommand($"{Prefix} {_arenas.Count} arène(s) sauvegardée(s) dans {path}");
     }
 
     [ConsoleCommand("css_arena_auto", "Recrée les arènes à partir des spawns de la map")]
-    [RequiresPermissions("@css/root")]
     public void CmdAuto(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         _arenas = ArenaStore.AutoDetect(Config.AutoDetectClusterRadius);
         _arenasLoaded = true;
         CancelAllDuels();
@@ -730,9 +784,9 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
     }
 
     [ConsoleCommand("css_arena_reload", "Recharge les arènes depuis le fichier")]
-    [RequiresPermissions("@css/root")]
     public void CmdReload(CCSPlayerController? caller, CommandInfo info)
     {
+        if (!CheckAdmin(caller, info)) return;
         _arenasLoaded = false;
         EnsureArenasLoaded();
         CancelAllDuels();
