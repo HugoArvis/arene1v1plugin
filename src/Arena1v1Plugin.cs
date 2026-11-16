@@ -116,7 +116,7 @@ public class Arena1v1Plugin : BasePlugin, IPluginConfig<ArenaConfig>
     // ------------------------------------------------------------------ joueurs
 
     private static bool IsValidPlayer(CCSPlayerController? c) =>
-        c is { IsValid: true, IsHLTV: false, Connected: PlayerConnectedState.PlayerConnected };
+        c is { IsValid: true, IsHLTV: false } && (uint)c.Connected == 0; // 0 = connecté (le nom de la valeur change selon la version de l'API)
 
     private ArenaPlayer GetOrCreate(CCSPlayerController c)
     {
