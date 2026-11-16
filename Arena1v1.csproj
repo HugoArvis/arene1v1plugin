@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Arena1v1</AssemblyName>
+    <RootNamespace>Arena1v1</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- La DLL de l'API est fournie par le serveur : on ne la copie pas dans le dossier de sortie -->
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.380">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>
